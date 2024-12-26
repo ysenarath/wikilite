@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wikilite"
+dynamic = ["version"]
+authors = [{ name = "Yasas" }]
+description = "A lightweight SQLite-based storage for Wikidict senses"
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "tqdm>=4.65.0", # for progress bars
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "wikilite.__version__" }
+
+[project.urls]
+"Homepage" = "https://github.com/ysenarath/wikilite"
+
+[project.scripts]
+wikilite = "wikilite.__main__:main"
