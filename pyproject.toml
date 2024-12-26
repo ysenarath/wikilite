@@ -11,6 +11,8 @@ readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
     "tqdm>=4.65.0", # for progress bars
+    "sqlalchemy>=2.0.0", # for database models and ORM
+    "click>=8.0.0", # for CLI interface
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
