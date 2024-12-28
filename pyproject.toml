@@ -13,6 +13,8 @@ dependencies = [
     "tqdm>=4.65.0",      # for progress bars
     "sqlalchemy>=2.0.0", # for database models and ORM
     "click>=8.0.0",      # for CLI interface
+    "dash>=2.9.0",       # for dashboard interface
+    "plotly>=5.13.0",    # for interactive visualizations
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
