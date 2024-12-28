@@ -5,13 +5,7 @@ from typing import List
 
 from sqlalchemy import ForeignKey, String, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import (
-    DeclarativeBase,
-    Mapped,
-    WriteOnlyMapped,
-    mapped_column,
-    relationship,
-)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 # Enable foreign key support for SQLite
@@ -38,13 +32,13 @@ class Word(Base):
     definition: Mapped[str] = mapped_column(String, nullable=False)
 
     # Relationships with proper type hints
-    examples: WriteOnlyMapped[List["Example"]] = relationship(
+    examples: Mapped[List["Example"]] = relationship(
         back_populates="word", cascade="all, delete-orphan", lazy="write_only"
     )
-    subject_triplets: WriteOnlyMapped[List["Triplet"]] = relationship(
+    subject_triplets: Mapped[List["Triplet"]] = relationship(
         foreign_keys="[Triplet.subject_id]", back_populates="subject", lazy="write_only"
     )
-    object_triplets: WriteOnlyMapped[List["Triplet"]] = relationship(
+    object_triplets: Mapped[List["Triplet"]] = relationship(
         foreign_keys="[Triplet.object_id]", back_populates="object", lazy="write_only"
     )
 
