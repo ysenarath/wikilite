@@ -148,6 +148,11 @@ def get_relations(
                 edges.setdefault(rel, set()).add(link)
     elif isinstance(obj, WordEntry):
         edges = {}
+        # word level relations
+        for rel in relations:
+            for link in getattr(obj, rel):
+                edges.setdefault(rel, set()).add(link)
+        # sense level relations of word
         for sense in obj.senses:
             for rel in relations:
                 for link in getattr(sense, rel):
