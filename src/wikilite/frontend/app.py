@@ -1,8 +1,7 @@
-from collections import deque
 from typing import List
 
 from pyvis.network import Network
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 import streamlit as st
 import streamlit.components.v1 as components
@@ -50,54 +49,133 @@ def get_relationships(db: WikiLite, word_id):
         return subject_relations, object_relations
 
 
-def get_relationships_with_depth(db: WikiLite, word_id: int, depth: int = 1):
-    relationships = []
-    visited = set()
-    queue = deque([(word_id, depth)])
-
+def get_unique_predicates(db: WikiLite):
     with Session(db.engine) as session:
-        while queue:
-            current_word_id, current_depth = queue.popleft()
-            if current_word_id in visited or current_depth == 0:
-                continue
-            visited.add(current_word_id)
+        query = select(func.distinct(Triplet.predicate)).order_by(Triplet.predicate)
+        return [predicate[0] for predicate in session.execute(query).fetchall()]
 
-            # Get relationships where word is subject
-            subject_query = select(Triplet).where(Triplet.subject_id == current_word_id)
-            subject_relations = session.scalars(subject_query).all()
-            relationships.extend(subject_relations)
 
-            # Get relationships where word is object
-            object_query = select(Triplet).where(Triplet.object_id == current_word_id)
-            object_relations = session.scalars(object_query).all()
-            relationships.extend(object_relations)
+def get_relationships_with_depth(
+    db: WikiLite, word_id: int, depth: int = 1, selected_predicates: List[str] = None
+):
+    with Session(db.engine) as session:
+        # CTE query to recursively get relationships up to specified depth
+        # Build predicate filter condition
+        predicate_filter = ""
+        params = {"word_id": word_id, "depth": depth}
 
-            # Add connected words to the queue with decremented depth
-            for rel in subject_relations:
-                queue.append((rel.object_id, current_depth - 1))
-            for rel in object_relations:
-                queue.append((rel.subject_id, current_depth - 1))
+        if selected_predicates:
+            predicate_list = ",".join([f"'{p}'" for p in selected_predicates])
+            predicate_filter = f"AND t.predicate IN ({predicate_list})"
 
-    return relationships
+        cte_query = text(f"""
+            WITH RECURSIVE relationship_tree AS (
+                -- Base case: direct relationships
+                SELECT t.*, 1 as level
+                FROM triplet t
+                WHERE (t.subject_id = :word_id OR t.object_id = :word_id)
+                {predicate_filter}
+                
+                UNION ALL
+                
+                -- Recursive case: relationships of connected words
+                SELECT t.*, rt.level + 1
+                FROM triplet t
+                JOIN relationship_tree rt ON 
+                    (t.subject_id = rt.object_id OR t.subject_id = rt.subject_id OR
+                     t.object_id = rt.object_id OR t.object_id = rt.subject_id)
+                WHERE rt.level < :depth
+                {predicate_filter}
+            )
+            SELECT DISTINCT id, subject_id, predicate, object_id
+            FROM relationship_tree
+            ORDER BY id;
+        """)
+
+        result = session.execute(cte_query, {"word_id": word_id, "depth": depth})
+
+        # Convert results to Triplet objects
+        relationships = []
+        for row in result:
+            triplet = session.get(Triplet, row.id)
+            if triplet:
+                relationships.append(triplet)
+
+        return relationships
 
 
 def create_network_graph(relationships: List[Triplet]):
     net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
+
+    # Configure physics for stability
+    net.force_atlas_2based(
+        gravity=-50,
+        central_gravity=0.01,
+        spring_length=100,
+        spring_strength=0.08,
+        damping=0.4,
+        overlap=0,
+    )
+
     # Add nodes and edges
     for rel in relationships:
-        # Add nodes
-        net.add_node(rel.subject_id, label=rel.subject.word)
-        net.add_node(rel.object_id, label=rel.object.word)
-        # Add edge
-        net.add_edge(rel.subject_id, rel.object_id, label=rel.predicate)
-    # Generate the HTML
-    net.toggle_physics(True)
+        # Add nodes with fixed positions
+        net.add_node(
+            rel.subject_id,
+            label=rel.subject.word,
+            physics=False,  # Disable physics for nodes
+            size=20,  # Larger nodes for better visibility
+        )
+        net.add_node(rel.object_id, label=rel.object.word, physics=False, size=20)
+        # Add edge with custom settings
+        net.add_edge(
+            rel.subject_id,
+            rel.object_id,
+            label=rel.predicate,
+            length=200,  # Fixed edge length
+        )
+
+    # Additional stabilization settings
+    net.set_options("""
+        const options = {
+            "physics": {
+                "enabled": true,
+                "stabilization": {
+                    "enabled": true,
+                    "iterations": 100,
+                    "updateInterval": 50,
+                    "fit": true
+                },
+                "minVelocity": 0.75,
+                "solver": "forceAtlas2Based"
+            }
+        }
+    """)
+
     return net.generate_html()
 
 
 def show_network_view(db: WikiLite, search_term: str):
-    # Depth selector for network view
-    depth = st.slider("Relationship Depth", min_value=1, max_value=3, value=1)
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        # Depth selector for network view
+        depth = st.selectbox(
+            "Relationship Depth",
+            options=[1, 2, 3],
+            help="Number of hops to explore in the relationship network"
+        )
+
+    with col2:
+        # Get all unique predicates
+        predicates = get_unique_predicates(db)
+        # Multi-select for relationship types
+        selected_predicates = st.multiselect(
+            "Filter by Relationship Types",
+            options=predicates,
+            default=predicates[:5] if predicates else None,  # Default to first 5 types
+            help="Select which types of relationships to show in the network",
+        )
 
     if search_term:
         with st.spinner("Searching..."):
@@ -106,17 +184,24 @@ def show_network_view(db: WikiLite, search_term: str):
                 word = session.scalars(query).first()
 
             if word:
-                # Get relationships
-                relationships = get_relationships_with_depth(db, word.id, depth)
+                # Get relationships with selected predicates
+                relationships = get_relationships_with_depth(
+                    db, word.id, depth, selected_predicates
+                )
 
                 if relationships:
                     # Create and display network graph
                     html = create_network_graph(relationships)
                     components.html(html, height=600)
 
-                    # Display relationship count
+                    # Display relationship count and filter info
                     st.write(
                         f"Found {len(relationships)} relationships at depth {depth}"
+                        + (
+                            f" (filtered by {len(selected_predicates)} relationship types)"
+                            if selected_predicates
+                            else ""
+                        )
                     )
                 else:
                     st.write("No relationships found for this word.")
@@ -215,4 +300,5 @@ def app():
         show_network_view(db, search_term)
 
 
-app()
+if __name__ == "__main__":
+    app()
