@@ -11,6 +11,17 @@ import tqdm
 
 import wikilite
 
+ALL_RELATIONS = [
+    "synonyms",
+    "antonyms",
+    "hypernyms",
+    "holonyms",
+    "meronyms",
+    "coordinate_terms",
+    "derived",
+    "related",
+]
+
 
 class WordLinkage(BaseModel):
     word: str
@@ -120,22 +131,25 @@ def singularize_relation(word: str) -> str:
 
 def get_relations(
     obj: WordSense | WordEntry,
-    relation: str | List[str] | None = None,
+    relations: str | List[str] | None = None,
 ) -> Dict[str, Set[WordLinkage]]:
     link: WordLinkage
-    if relation is None:
-        relation = ["synonyms", "antonyms", "hypernyms"]
-    elif isinstance(relation, str):
-        relation = [relation]
+    if relations is None:
+        relations = ["synonyms", "antonyms", "hypernyms"]
+    elif isinstance(relations, str):
+        if relations == "all":
+            relations = ALL_RELATIONS
+        else:
+            relations = [relations]
     edges: Dict[str, Set[WordLinkage]] = {}
     if isinstance(obj, WordSense):
-        for rel in relation:
+        for rel in relations:
             for link in getattr(obj, rel):
                 edges.setdefault(rel, set()).add(link)
     elif isinstance(obj, WordEntry):
         edges = {}
         for sense in obj.senses:
-            for rel in relation:
+            for rel in relations:
                 for link in getattr(sense, rel):
                     edges.setdefault(rel, set()).add(link)
     return edges
