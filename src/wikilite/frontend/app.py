@@ -1,3 +1,5 @@
+from typing import List
+
 from pyvis.network import Network
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -78,24 +80,21 @@ def get_relationships_with_depth(db: WikiLite, word_id, depth=1, visited=None):
     return relationships
 
 
-def create_network_graph(relationships):
+def create_network_graph(relationships: List[Triplet]):
     net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
-
     # Add nodes and edges
     for rel in relationships:
         # Add nodes
         net.add_node(rel.subject_id, label=rel.subject.word)
         net.add_node(rel.object_id, label=rel.object.word)
-
         # Add edge
         net.add_edge(rel.subject_id, rel.object_id, label=rel.predicate)
-
     # Generate the HTML
     net.toggle_physics(True)
     return net.generate_html()
 
 
-def show_network_view(db: WikiLite, search_term):
+def show_network_view(db: WikiLite, search_term: str):
     # Depth selector for network view
     depth = st.slider("Relationship Depth", min_value=1, max_value=3, value=1)
 
