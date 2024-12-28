@@ -1,5 +1,8 @@
-from sqlalchemy import select
+from pyvis.network import Network
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 import streamlit as st
+import streamlit.components.v1 as components
 
 from wikilite.base import WikiLite
 from wikilite.models import Example, Triplet, Word
@@ -12,13 +15,9 @@ def init_db():
 
 
 # Search words in database
-def search_words(db, search_term, limit=50):
-    from sqlalchemy.orm import Session
-
+def search_words(db: WikiLite, search_term, limit=50):
     with Session(db.engine) as session:
         # Use func.lower() for case-insensitive search
-        from sqlalchemy import func
-
         query = (
             select(Word)
             .where(func.lower(Word.word).like(f"%{search_term.lower()}%"))
@@ -28,18 +27,14 @@ def search_words(db, search_term, limit=50):
 
 
 # Get word examples
-def get_examples(db, word_id):
-    from sqlalchemy.orm import Session
-
+def get_examples(db: WikiLite, word_id):
     with Session(db.engine) as session:
         query = select(Example).where(Example.word_id == word_id)
         return session.scalars(query).all()
 
 
 # Get semantic relationships
-def get_relationships(db, word_id):
-    from sqlalchemy.orm import Session
-
+def get_relationships(db: WikiLite, word_id):
     with Session(db.engine) as session:
         # Get relationships where word is subject
         subject_query = select(Triplet).where(Triplet.subject_id == word_id)
@@ -52,79 +47,172 @@ def get_relationships(db, word_id):
         return subject_relations, object_relations
 
 
-# Page configuration
-st.set_page_config(page_title="WikiLite Explorer", page_icon="📚", layout="wide")
+def get_relationships_with_depth(db: WikiLite, word_id, depth=1, visited=None):
+    if visited is None:
+        visited = set()
+    if depth == 0 or word_id in visited:
+        return []
+    visited.add(word_id)
+    relationships = []
+    with Session(db.engine) as session:
+        # Get relationships where word is subject
+        subject_query = select(Triplet).where(Triplet.subject_id == word_id)
+        subject_relations = session.scalars(subject_query).all()
+        relationships.extend(subject_relations)
 
-# Custom CSS
-st.markdown(
-    """
-    <style>
-    .stExpander {
-        border: 1px solid #ddd;
-        border-radius: 5px;
-        margin-bottom: 10px;
-    }
-    </style>
-""",
-    unsafe_allow_html=True,
-)
+        # Get relationships where word is object
+        object_query = select(Triplet).where(Triplet.object_id == word_id)
+        object_relations = session.scalars(object_query).all()
+        relationships.extend(object_relations)
 
-# Page title with emoji
-st.title("📚 WikiLite Explorer")
-st.markdown("*A lightweight dictionary explorer with semantic relationships*")
+        # Recursively get relationships for connected words
+        for rel in subject_relations:
+            relationships.extend(
+                get_relationships_with_depth(db, rel.object_id, depth - 1, visited)
+            )
+        for rel in object_relations:
+            relationships.extend(
+                get_relationships_with_depth(db, rel.subject_id, depth - 1, visited)
+            )
 
-# Initialize database
-db = init_db()
+    return relationships
 
-# Search box with placeholder
-search_term = st.text_input(
-    "Search for a word",
-    placeholder="Type a word (e.g., 'apple', 'run', 'happy')",
-    key="search_input",
-)
 
-if search_term:
-    # Show loading spinner during search
-    with st.spinner("Searching..."):
-        words = search_words(db, search_term)
+def create_network_graph(relationships):
+    net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
 
-    if words:
-        # Display result count
-        st.write(
-            f"Found {len(words)} results{' (showing first 50)' if len(words) >= 50 else ''}"
-        )
+    # Add nodes and edges
+    for rel in relationships:
+        # Add nodes
+        net.add_node(rel.subject_id, label=rel.subject.word)
+        net.add_node(rel.object_id, label=rel.object.word)
 
-        # Display results
-        for word in words:
-            with st.expander(f"{word.word} - {word.definition[:100]}..."):
-                st.write("**Definition:**")
-                st.write(word.definition)
+        # Add edge
+        net.add_edge(rel.subject_id, rel.object_id, label=rel.predicate)
 
-                # Display examples
-                examples = get_examples(db, word.id)
-                if examples:
-                    st.write("**Examples:**")
-                    for example in examples:
-                        st.write(f"- {example.example}")
+    # Generate the HTML
+    net.toggle_physics(True)
+    return net.generate_html()
 
-                # Display relationships
-                subject_relations, object_relations = get_relationships(db, word.id)
 
-                if subject_relations or object_relations:
-                    st.write("**Semantic Relationships:**")
+def show_network_view(db: WikiLite, search_term):
+    # Depth selector for network view
+    depth = st.slider("Relationship Depth", min_value=1, max_value=3, value=1)
 
-                    if subject_relations:
-                        st.write("As subject:")
-                        for rel in subject_relations:
-                            st.write(f"- {word.word} {rel.predicate} {rel.object.word}")
+    if search_term:
+        with st.spinner("Searching..."):
+            with Session(db.engine) as session:
+                query = select(Word).where(func.lower(Word.word) == search_term.lower())
+                word = session.scalars(query).first()
 
-                    if object_relations:
-                        st.write("As object:")
-                        for rel in object_relations:
-                            st.write(
-                                f"- {rel.subject.word} {rel.predicate} {word.word}"
-                            )
+            if word:
+                # Get relationships
+                relationships = get_relationships_with_depth(db, word.id, depth)
+
+                if relationships:
+                    # Create and display network graph
+                    html = create_network_graph(relationships)
+                    components.html(html, height=600)
+
+                    # Display relationship count
+                    st.write(
+                        f"Found {len(relationships)} relationships at depth {depth}"
+                    )
+                else:
+                    st.write("No relationships found for this word.")
+            else:
+                st.write("Word not found. Please try another word.")
+
+
+def show_explorer_view(db: WikiLite, search_term):
+    if search_term:
+        # Show loading spinner during search
+        with st.spinner("Searching..."):
+            words = search_words(db, search_term)
+
+        if words:
+            # Display result count
+            st.write(
+                f"Found {len(words)} results{' (showing first 50)' if len(words) >= 50 else ''}"
+            )
+
+            # Display results
+            for word in words:
+                with st.expander(f"{word.word} - {word.definition[:100]}..."):
+                    st.write("**Definition:**")
+                    st.write(word.definition)
+
+                    # Display examples
+                    examples = get_examples(db, word.id)
+                    if examples:
+                        st.write("**Examples:**")
+                        for example in examples:
+                            st.write(f"- {example.example}")
+
+                    # Display relationships
+                    subject_relations, object_relations = get_relationships(db, word.id)
+
+                    if subject_relations or object_relations:
+                        st.write("**Semantic Relationships:**")
+
+                        if subject_relations:
+                            st.write("As subject:")
+                            for rel in subject_relations:
+                                st.write(
+                                    f"- {word.word} {rel.predicate} {rel.object.word}"
+                                )
+
+                        if object_relations:
+                            st.write("As object:")
+                            for rel in object_relations:
+                                st.write(
+                                    f"- {rel.subject.word} {rel.predicate} {word.word}"
+                                )
+        else:
+            st.write("No results found.")
     else:
-        st.write("No results found.")
-else:
-    st.write("Enter a word to search the WikiLite database.")
+        st.write("Enter a word to search the WikiLite database.")
+
+
+def app():
+    # Page configuration
+    st.set_page_config(page_title="WikiLite Explorer", page_icon="📚", layout="wide")
+
+    # Custom CSS
+    st.markdown(
+        """
+        <style>
+        .stExpander {
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        </style>
+    """,
+        unsafe_allow_html=True,
+    )
+
+    # Page title with emoji
+    st.title("📚 WikiLite Explorer")
+    st.markdown("*A lightweight dictionary explorer with semantic relationships*")
+
+    # Initialize database
+    db = init_db()
+
+    # Search box with placeholder
+    search_term = st.text_input(
+        "Search for a word",
+        placeholder="Type a word (e.g., 'apple', 'run', 'happy')",
+        key="search_input",
+    )
+
+    # Create tabs
+    tab1, tab2 = st.tabs(["Explorer", "Network Visualization"])
+
+    with tab1:
+        show_explorer_view(db, search_term)
+    with tab2:
+        show_network_view(db, search_term)
+
+
+app()
