@@ -10,9 +10,9 @@ description = "A lightweight SQLite-based storage for Wikidict senses"
 readme = "README.md"
 requires-python = ">=3.7"
 dependencies = [
-    "tqdm>=4.65.0", # for progress bars
+    "tqdm>=4.65.0",      # for progress bars
     "sqlalchemy>=2.0.0", # for database models and ORM
-    "click>=8.0.0", # for CLI interface
+    "click>=8.0.0",      # for CLI interface
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -28,3 +28,11 @@ version = { attr = "wikilite.__version__" }
 
 [project.scripts]
 wikilite = "wikilite.__main__:main"
+
+[tool.ruff]
+# Enable the isort rules.
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["wikilite"]

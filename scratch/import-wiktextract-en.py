@@ -1,5 +1,6 @@
 from pathlib import Path
-from wikilite.models import WikiLite
+
+from wikilite import WikiLite
 
 resources_path = Path(__file__).parent.parent / "resources"
 
