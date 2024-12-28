@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tqdm import tqdm
 from typing import Dict, List, Optional, Set, Tuple
 from sqlalchemy import ForeignKey, String, create_engine as create_engine_
 from sqlalchemy.orm import (
@@ -19,7 +20,8 @@ from wikilite.utils import wiktextract
 
 
 # Create base class with naming convention
-class Base(DeclarativeBase): ...
+class Base(DeclarativeBase):
+    pass
 
 
 class Word(Base):
@@ -109,7 +111,7 @@ def _import_words(inst: WikiLite, data: List[Tuple[str, Dict[str, List[str]]]]) 
 
         # Process words in batches
         word_batch: List[Word] = []
-        for word_str, definitions in data:
+        for word_str, definitions in tqdm(data, desc="Importing words"):
             for definition in definitions:
                 word_obj = Word(word=word_str, definition=definition)
                 word_batch.append(word_obj)
@@ -127,7 +129,7 @@ def _import_words(inst: WikiLite, data: List[Tuple[str, Dict[str, List[str]]]]) 
 
         # Process examples in batches
         example_batch: List[Example] = []
-        for word_str, definitions in data:
+        for word_str, definitions in tqdm(data, desc="Importing examples"):
             word_objs = word_map.get(word_str, [])
             if not word_objs:
                 continue
@@ -157,12 +159,13 @@ def _import_triples(inst: WikiLite, triples: Set[Tuple[str, str, str]]) -> None:
     with Session() as session:
         # Get all words and create a mapping
         word_map: Dict[str, List[Word]] = {}
-        for word_obj in session.query(Word).all():
+        print("Loading words for triplet mapping...")
+        for word_obj in tqdm(session.query(Word).all(), desc="Loading words"):
             word_map.setdefault(word_obj.word, []).append(word_obj)
 
         # Process triplets in batches
         triplet_batch: List[Triplet] = []
-        for subject_str, predicate, object_str in triples:
+        for subject_str, predicate, object_str in tqdm(triples, desc="Importing triplets"):
             subject_objs = word_map.get(subject_str, [])
             object_objs = word_map.get(object_str, [])
 
