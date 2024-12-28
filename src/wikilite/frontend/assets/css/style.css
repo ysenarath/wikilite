@@ -1,0 +1,17 @@
+.form-control .Select-control {
+    border-radius: 0px;
+    background-color: inherit;
+    color: inherit;
+    border: none;
+}
+
+.form-control .Select {
+    padding: 0.1em;
+}
+
+.form-control .Select-menu-outer {
+    border-radius: 0px;
+    border: none;
+    color: inherit;
+    background-color: inherit;
+}
