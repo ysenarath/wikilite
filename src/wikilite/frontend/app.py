@@ -1,3 +1,4 @@
+from collections import deque
 from typing import List
 
 from pyvis.network import Network
@@ -49,33 +50,33 @@ def get_relationships(db: WikiLite, word_id):
         return subject_relations, object_relations
 
 
-def get_relationships_with_depth(db: WikiLite, word_id, depth=1, visited=None):
-    if visited is None:
-        visited = set()
-    if depth == 0 or word_id in visited:
-        return []
-    visited.add(word_id)
+def get_relationships_with_depth(db: WikiLite, word_id: int, depth: int = 1):
     relationships = []
+    visited = set()
+    queue = deque([(word_id, depth)])
+
     with Session(db.engine) as session:
-        # Get relationships where word is subject
-        subject_query = select(Triplet).where(Triplet.subject_id == word_id)
-        subject_relations = session.scalars(subject_query).all()
-        relationships.extend(subject_relations)
+        while queue:
+            current_word_id, current_depth = queue.popleft()
+            if current_word_id in visited or current_depth == 0:
+                continue
+            visited.add(current_word_id)
 
-        # Get relationships where word is object
-        object_query = select(Triplet).where(Triplet.object_id == word_id)
-        object_relations = session.scalars(object_query).all()
-        relationships.extend(object_relations)
+            # Get relationships where word is subject
+            subject_query = select(Triplet).where(Triplet.subject_id == current_word_id)
+            subject_relations = session.scalars(subject_query).all()
+            relationships.extend(subject_relations)
 
-        # Recursively get relationships for connected words
-        for rel in subject_relations:
-            relationships.extend(
-                get_relationships_with_depth(db, rel.object_id, depth - 1, visited)
-            )
-        for rel in object_relations:
-            relationships.extend(
-                get_relationships_with_depth(db, rel.subject_id, depth - 1, visited)
-            )
+            # Get relationships where word is object
+            object_query = select(Triplet).where(Triplet.object_id == current_word_id)
+            object_relations = session.scalars(object_query).all()
+            relationships.extend(object_relations)
+
+            # Add connected words to the queue with decremented depth
+            for rel in subject_relations:
+                queue.append((rel.object_id, current_depth - 1))
+            for rel in object_relations:
+                queue.append((rel.subject_id, current_depth - 1))
 
     return relationships
 
