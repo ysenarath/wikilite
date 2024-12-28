@@ -1,11 +1,20 @@
+from __future__ import annotations
+
 from typing import List
 
-import plotly.graph_objects as go
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
+import dash_cytoscape as cyto
+from sqlalchemy import func, literal_column, or_, select
+from sqlalchemy.orm import Session, aliased
 
 from wikilite.base import WikiLite
 from wikilite.models import Example, Triplet, Word
+
+CYTOSCAPE_LAYOUT = "cose"
+
+# from packaging.version import Version
+# if Version(cyto.__version__) > Version("0.2.0"):
+#     cyto.load_extra_layouts()
+#     CYTOSCAPE_LAYOUT = "cola"
 
 
 def init_client() -> WikiLite:
@@ -62,121 +71,145 @@ def get_relationships_with_depth(
 ) -> List[Triplet]:
     """Get word relationships up to a specified depth with optional predicate filtering"""
     with Session(db.engine) as session:
-        predicate_filter = ""
-        params = {"word_id": word_id, "depth": depth}
+        # Base level relationships
+        triplet = aliased(Triplet)
+        base = select(
+            triplet.id,
+            triplet.subject_id,
+            triplet.predicate,
+            triplet.object_id,
+            literal_column("1").label("level"),
+        ).where((triplet.subject_id == word_id) | (triplet.object_id == word_id))
 
         if rel_types:
-            predicate_list = ",".join([f"'{p}'" for p in rel_types])
-            predicate_filter = f"AND t.predicate IN ({predicate_list})"
+            base = base.where(triplet.predicate.in_(rel_types))
 
-        cte_query = text(f"""
-            WITH RECURSIVE relationship_tree AS (
-                SELECT t.*, 1 as level
-                FROM triplet t
-                WHERE (t.subject_id = :word_id OR t.object_id = :word_id)
-                {predicate_filter}
-                
-                UNION ALL
-                
-                SELECT t.*, rt.level + 1
-                FROM triplet t
-                JOIN relationship_tree rt ON 
-                    (t.subject_id = rt.object_id OR t.subject_id = rt.subject_id OR
-                     t.object_id = rt.object_id OR t.object_id = rt.subject_id)
-                WHERE rt.level < :depth
-                {predicate_filter}
+        # Create CTE
+        cte = base.cte("relationship_tree", recursive=True)
+
+        # Recursive part
+        t = aliased(Triplet)
+        recursive = (
+            select(
+                t.id,
+                t.subject_id,
+                t.predicate,
+                t.object_id,
+                (cte.c.level + 1).label("level"),
             )
-            SELECT DISTINCT id, subject_id, predicate, object_id
-            FROM relationship_tree
-            ORDER BY id;
-        """)
+            .join(
+                cte,
+                or_(
+                    t.subject_id == cte.c.object_id,
+                    t.subject_id == cte.c.subject_id,
+                    t.object_id == cte.c.object_id,
+                    t.object_id == cte.c.subject_id,
+                ),
+            )
+            .where(cte.c.level < depth)
+        )
 
-        result = session.execute(cte_query, {"word_id": word_id, "depth": depth})
-        relationships = []
-        for row in result:
-            triplet = session.get(Triplet, row.id)
-            if triplet:
-                relationships.append(triplet)
-        return relationships
+        if rel_types:
+            recursive = recursive.where(t.predicate.in_(rel_types))
+
+        # Complete CTE with union
+        cte = cte.union_all(recursive)
+
+        # Final query
+        final_query = (
+            select(Triplet)
+            .join(cte, Triplet.id == cte.c.id)
+            .distinct()
+            .order_by(Triplet.id)
+        )
+
+        return session.scalars(final_query).all()
 
 
-def create_network_graph(relationships: List[Triplet]):
+def create_network_graph(
+    relationships: List[Triplet], id: str | None = None
+) -> cyto.Cytoscape:
     """Create a Plotly network visualization of word relationships"""
+    if id is None:
+        id = "triplets-network"
     if not relationships:
-        return {}
-
-    nodes = set()
+        return cyto.Cytoscape(
+            id=id,
+            layout={"name": "preset"},
+            style={"width": "100%", "height": "800px"},
+            elements=[],
+        )
+    nodes = []
+    existing_nodes = set()
     edges = []
-    node_labels = {}
-    edge_labels = []
-
-    # Add nodes and edges
     for rel in relationships:
-        nodes.add(rel.subject_id)
-        nodes.add(rel.object_id)
-        node_labels[rel.subject_id] = rel.subject.word
-        node_labels[rel.object_id] = rel.object.word
-        edges.append((rel.subject_id, rel.object_id))
-        edge_labels.append(rel.predicate)
-
-    # Convert to lists for plotting
-    node_x = []
-    node_y = []
-    edge_x = []
-    edge_y = []
-
-    # Create circular layout for nodes
-    import math
-
-    radius = 1
-    angle = 2 * math.pi / len(nodes)
-
-    # Position nodes in a circle
-    node_positions = {}
-    for i, node in enumerate(nodes):
-        x = radius * math.cos(i * angle)
-        y = radius * math.sin(i * angle)
-        node_positions[node] = (x, y)
-        node_x.append(x)
-        node_y.append(y)
-
-    # Create edges
-    for edge in edges:
-        x0, y0 = node_positions[edge[0]]
-        x1, y1 = node_positions[edge[1]]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
-
-    # Create edge trace
-    edge_trace = go.Scatter(
-        x=edge_x,
-        y=edge_y,
-        line=dict(width=0.5, color="#888"),
-        hoverinfo="none",
-        mode="lines",
+        if rel.subject_id not in existing_nodes:
+            nodes.append(
+                {
+                    "data": {
+                        "id": f"node-{rel.subject_id}",
+                        "label": rel.subject.word,
+                        "type": "word",
+                    }
+                }
+            )
+            existing_nodes.add(rel.subject_id)
+        if rel.object_id not in existing_nodes:
+            nodes.append(
+                {
+                    "data": {
+                        "id": f"node-{rel.object_id}",
+                        "label": rel.object.word,
+                        "type": "word",
+                    }
+                }
+            )
+            existing_nodes.add(rel.object_id)
+        edges.append(
+            {
+                "data": {
+                    "source": f"node-{rel.subject_id}",
+                    "target": f"node-{rel.object_id}",
+                    "label": rel.predicate,
+                    "type": "relationship",
+                }
+            }
+        )
+    elements = nodes + edges
+    return cyto.Cytoscape(
+        id=id,
+        layout={"name": CYTOSCAPE_LAYOUT},
+        style={"width": "100%", "height": "800px"},
+        elements=elements,
+        stylesheet=[
+            {
+                "selector": "node",
+                "style": {
+                    "label": "data(label)",
+                    # "shape": "round-octagon",
+                    "background-color": "lightblue",
+                    "border-width": 0.1,
+                    "outline-width": 0,
+                    "border-color": "lightblue",
+                    "border-opacity": 0.5,
+                    "color": "orange",
+                    "width": "1.5rem",
+                    "height": "1.5rem",
+                    "font-size": "1.5rem",
+                    "arrow-scale": 0.1,
+                },
+            },
+            {
+                "selector": "edge",
+                "style": {
+                    "label": "data(label)",
+                    "curve-style": "bezier",
+                    "target-arrow-shape": "triangle",
+                    "arrow-scale": 0.1,
+                    "width": 0.1,
+                    "font-size": "1.5rem",
+                    "color": "orange",
+                },
+            },
+        ],
     )
-
-    # Create node trace
-    node_trace = go.Scatter(
-        x=node_x,
-        y=node_y,
-        mode="markers+text",
-        hoverinfo="text",
-        text=list(node_labels.values()),
-        textposition="top center",
-        marker=dict(showscale=False, size=20, line_width=2),
-    )
-
-    # Create figure
-    fig = go.Figure(
-        data=[edge_trace, node_trace],
-        layout=go.Layout(
-            showlegend=False,
-            hovermode="closest",
-            margin=dict(b=20, l=5, r=5, t=40),
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        ),
-    )
-
-    return fig

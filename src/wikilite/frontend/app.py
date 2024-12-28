@@ -58,7 +58,7 @@ def get_search_settings_modal(*, rel_types: List[str]) -> dbc.Modal:
                                 [
                                     dbc.Label("Network Depth"),
                                     dbc.Input(
-                                        id="network-depth-input", type="number", value=3
+                                        id="network-depth-input", type="number", value=1
                                     ),
                                     dbc.FormText(
                                         "The maximum depth to search for relationships",
@@ -173,15 +173,22 @@ def get_layout(*, color_mode: str, rel_types: List[str]) -> List:
     """Generate the layout for the WikiLite Dash app"""
     layout = [
         get_navbar(color_mode=color_mode, rel_types=rel_types),
-        dbc.Tabs(
+        html.Div(
             [
-                dbc.Tab(label="Explorer", tab_id="tab-1"),
-                dbc.Tab(label="Network", tab_id="tab-2"),
+                dbc.Tabs(
+                    [
+                        dbc.Tab(label="Explorer", tab_id="tab-1"),
+                        dbc.Tab(label="Network", tab_id="tab-2"),
+                    ],
+                    id="tabs",
+                    active_tab="tab-1",
+                    # class_name="nav nav-underline",
+                    # persistence=True,
+                    # persistence_type="local",
+                ),
+                html.Div(id="tabs-content"),
             ],
-            id="tabs",
-            active_tab="tab-1",
         ),
-        html.Div(id="tabs-content"),
     ]
     return layout
 
@@ -312,8 +319,7 @@ class WikiLiteApp(dash.Dash):
                         rel_types=rel_types,
                     )
                 )
-            fig = create_network_graph(relationships)
-            return dcc.Graph(figure=fig)
+            return create_network_graph(relationships)
         return html.Div("No search query provided", id="network-tab", className="p-3")
 
 
