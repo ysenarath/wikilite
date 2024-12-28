@@ -1,515 +1,322 @@
+from pathlib import Path
 from typing import List
 
-from pyvis.network import Network
-from sqlalchemy import func, select, text
-from sqlalchemy.orm import Session
-import streamlit as st
-import streamlit.components.v1 as components
+import dash
+from dash import Input, Output, State, dcc, html
+import dash_bootstrap_components as dbc
 
-from wikilite.base import WikiLite
-from wikilite.models import Example, Triplet, Word
-
-
-# Initialize WikiLite database
-@st.cache_resource
-def init_db():
-    return WikiLite("wiktextract-en-v1")
+from wikilite.frontend.helpers import (
+    create_network_graph,
+    get_examples,
+    get_relationships_with_depth,
+    get_unique_rel_types,
+    init_client,
+    search_words,
+)
 
 
-# Search words in database
-def search_words(db: WikiLite, search_term, limit=50):
-    with Session(db.engine) as session:
-        # Use func.lower() for case-insensitive search
-        query = (
-            select(Word)
-            .where(func.lower(Word.word).like(f"%{search_term.lower()}%"))
-            .limit(limit)
-        )
-        return session.scalars(query).all()
-
-
-# Get word examples
-def get_examples(db: WikiLite, word_id):
-    with Session(db.engine) as session:
-        query = select(Example).where(Example.word_id == word_id)
-        return session.scalars(query).all()
-
-
-# Get semantic relationships
-def get_relationships(db: WikiLite, word_id):
-    with Session(db.engine) as session:
-        # Get relationships where word is subject
-        subject_query = select(Triplet).where(Triplet.subject_id == word_id)
-        subject_relations = session.scalars(subject_query).all()
-
-        # Get relationships where word is object
-        object_query = select(Triplet).where(Triplet.object_id == word_id)
-        object_relations = session.scalars(object_query).all()
-
-        return subject_relations, object_relations
-
-
-def get_unique_predicates(db: WikiLite):
-    with Session(db.engine) as session:
-        query = select(func.distinct(Triplet.predicate)).order_by(Triplet.predicate)
-        return [predicate[0] for predicate in session.execute(query).fetchall()]
-
-
-def get_relationships_with_depth(
-    db: WikiLite, word_id: int, depth: int = 1, selected_predicates: List[str] = None
-):
-    with Session(db.engine) as session:
-        # CTE query to recursively get relationships up to specified depth
-        # Build predicate filter condition
-        predicate_filter = ""
-        params = {"word_id": word_id, "depth": depth}
-
-        if selected_predicates:
-            predicate_list = ",".join([f"'{p}'" for p in selected_predicates])
-            predicate_filter = f"AND t.predicate IN ({predicate_list})"
-
-        cte_query = text(f"""
-            WITH RECURSIVE relationship_tree AS (
-                -- Base case: direct relationships
-                SELECT t.*, 1 as level
-                FROM triplet t
-                WHERE (t.subject_id = :word_id OR t.object_id = :word_id)
-                {predicate_filter}
-                
-                UNION ALL
-                
-                -- Recursive case: relationships of connected words
-                SELECT t.*, rt.level + 1
-                FROM triplet t
-                JOIN relationship_tree rt ON 
-                    (t.subject_id = rt.object_id OR t.subject_id = rt.subject_id OR
-                     t.object_id = rt.object_id OR t.object_id = rt.subject_id)
-                WHERE rt.level < :depth
-                {predicate_filter}
-            )
-            SELECT DISTINCT id, subject_id, predicate, object_id
-            FROM relationship_tree
-            ORDER BY id;
-        """)
-
-        result = session.execute(cte_query, {"word_id": word_id, "depth": depth})
-
-        # Convert results to Triplet objects
-        relationships = []
-        for row in result:
-            triplet = session.get(Triplet, row.id)
-            if triplet:
-                relationships.append(triplet)
-
-        return relationships
-
-
-def create_network_graph(relationships: List[Triplet]):
-    net = Network(height="600px", width="100%", bgcolor="#ffffff", font_color="black")
-
-    # Configure physics for stability
-    net.force_atlas_2based(
-        gravity=-50,
-        central_gravity=0.01,
-        spring_length=100,
-        spring_strength=0.08,
-        damping=0.4,
-        overlap=0,
-    )
-
-    # Add nodes and edges
-    for rel in relationships:
-        # Add nodes with fixed positions
-        net.add_node(
-            rel.subject_id,
-            label=rel.subject.word,
-            physics=False,  # Disable physics for nodes
-            size=20,  # Larger nodes for better visibility
-        )
-        net.add_node(rel.object_id, label=rel.object.word, physics=False, size=20)
-        # Add edge with custom settings
-        net.add_edge(
-            rel.subject_id,
-            rel.object_id,
-            label=rel.predicate,
-            length=200,  # Fixed edge length
-        )
-
-    # Additional stabilization settings
-    net.set_options("""
-        const options = {
-            "physics": {
-                "enabled": true,
-                "stabilization": {
-                    "enabled": true,
-                    "iterations": 100,
-                    "updateInterval": 50,
-                    "fit": true
-                },
-                "minVelocity": 0.75,
-                "solver": "forceAtlas2Based"
-            }
-        }
-    """)
-
-    return net.generate_html()
-
-
-def show_network_view(db: WikiLite, search_term: str, depth: int, selected_predicates: List[str]):
-    if search_term:
-        st.markdown("""
-            <div style='background-color: #1e293b; color: white; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;'>
-                <h3 style='margin: 0; font-size: 1.2rem; color: #e2e8f0;'>Network Visualization</h3>
-                <p style='margin: 0.5rem 0 0 0; font-size: 0.9rem; color: #94a3b8;'>
-                    Explore word relationships at depth {depth}
-                </p>
-            </div>
-        """.format(depth=depth), unsafe_allow_html=True)
-        with st.spinner("Searching..."):
-            with Session(db.engine) as session:
-                query = select(Word).where(func.lower(Word.word) == search_term.lower())
-                word = session.scalars(query).first()
-
-            if word:
-                # Get relationships with selected predicates
-                relationships = get_relationships_with_depth(
-                    db, word.id, depth, selected_predicates
+def get_search_settings_modal(*, rel_types: List[str]) -> dbc.Modal:
+    options = [{"label": p, "value": p} for p in rel_types]
+    return dbc.Modal(
+        [
+            dbc.ModalHeader(dbc.ModalTitle("Search Settings")),
+            dbc.ModalBody(
+                [
+                    dbc.Form(
+                        [
+                            html.Div(
+                                [
+                                    dbc.Label("Search Limit"),
+                                    dbc.Input(
+                                        id="search-limit-input", type="number", value=20
+                                    ),
+                                    dbc.FormText(
+                                        "The maximum number of search results to return",
+                                        color="muted",
+                                    ),
+                                ],
+                                className="mb-3",
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Label("Relationships"),
+                                    dcc.Dropdown(
+                                        options=options,
+                                        value=[o["value"] for o in options],
+                                        id="relation-types-select",
+                                        multi=True,
+                                        className="form-control",
+                                    ),
+                                    dbc.FormText(
+                                        "Filter search results by relationships",
+                                        color="muted",
+                                    ),
+                                ],
+                                className="mb-3",
+                            ),
+                            html.Div(
+                                [
+                                    dbc.Label("Network Depth"),
+                                    dbc.Input(
+                                        id="network-depth-input", type="number", value=3
+                                    ),
+                                    dbc.FormText(
+                                        "The maximum depth to search for relationships",
+                                        color="muted",
+                                    ),
+                                ],
+                                className="mb-3",
+                            ),
+                        ]
+                    ),
+                ]
+            ),
+            dbc.ModalFooter(
+                dbc.Button(
+                    "Close",
+                    id="search-settings-close-button",
+                    className="ms-auto",
+                    n_clicks=0,
                 )
+            ),
+        ],
+        id="search-settings-modal",
+        is_open=False,
+    )
 
-                if relationships:
-                    # Create and display network graph
-                    html = create_network_graph(relationships)
-                    components.html(html, height=600)
 
-                    # Display relationship count and filter info
-                    st.write(
-                        f"Found {len(relationships)} relationships at depth {depth}"
-                        + (
-                            f" (filtered by {len(selected_predicates)} relationship types)"
-                            if selected_predicates
-                            else ""
-                        )
+def get_navbar(*, color_mode: str, rel_types: List[str]) -> dbc.Navbar:
+    color_mode_switch = html.Span(
+        [
+            dbc.Label(
+                html.I(className="bi bi-moon-stars-fill"),
+                html_for="switch",
+                className="m-0",
+            ),
+            dbc.Switch(
+                id="switch",
+                value=color_mode == "light",
+                style={"margin": ".125rem", "padding-left": "2.8rem"},
+                persistence=True,
+            ),
+            dbc.Label(
+                html.I(className="bi bi-sun-fill"),
+                html_for="switch",
+                className="m-0",
+            ),
+        ],
+        className="d-flex h-100 justify-content-center align-items-center",
+    )
+    return dbc.Navbar(
+        dbc.Container(
+            [
+                dbc.NavbarBrand(
+                    [
+                        html.I(className="bi bi-lightbulb-fill me-2"),
+                        "WikiLite",
+                    ],
+                    href="#",
+                    className="me-2",
+                ),
+                dbc.NavbarToggler(id="navbar-toggler", n_clicks=0),
+                dbc.Collapse(
+                    [
+                        dbc.Nav(
+                            [
+                                dbc.NavItem(
+                                    dbc.InputGroup(
+                                        [
+                                            dbc.Input(
+                                                id="nav-search-input",
+                                                type="text",
+                                                placeholder="Search Wikipedia",
+                                                className="form-control",
+                                                style={"width": "40rem"},
+                                            ),
+                                            dbc.Button(
+                                                html.I(className="bi bi-gear-fill"),
+                                                id="search-settings-open-button",
+                                            ),
+                                            get_search_settings_modal(
+                                                rel_types=rel_types
+                                            ),
+                                            dbc.Button(
+                                                html.I(className="bi bi-search"),
+                                                id="search-button",
+                                            ),
+                                        ],
+                                    ),
+                                ),
+                            ],
+                            className="me-auto ms-3",
+                            navbar=True,
+                        ),
+                        dbc.Nav(
+                            [
+                                dbc.NavItem(color_mode_switch, className="ms-3"),
+                            ],
+                            navbar=True,
+                        ),
+                    ],
+                    is_open=False,
+                    navbar=True,
+                    id="navbar-collapse",
+                ),
+            ],
+            fluid=True,
+        ),
+        className="navbar navbar-expand-md bg-body-tertiary mb-3",
+    )
+
+
+def get_layout(*, color_mode: str, rel_types: List[str]) -> List:
+    """Generate the layout for the WikiLite Dash app"""
+    layout = [
+        get_navbar(color_mode=color_mode, rel_types=rel_types),
+        dbc.Tabs(
+            [
+                dbc.Tab(label="Explorer", tab_id="tab-1"),
+                dbc.Tab(label="Network", tab_id="tab-2"),
+            ],
+            id="tabs",
+            active_tab="tab-1",
+        ),
+        html.Div(id="tabs-content"),
+    ]
+    return layout
+
+
+class WikiLiteApp(dash.Dash):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.title = "WikiLite"
+        self.client = init_client()
+        self.rel_types = get_unique_rel_types(self.client)
+        self.layout = get_layout(color_mode="dark", rel_types=self.rel_types)
+        self.register_callbacks()
+
+    def interpolate_index(self, **kwargs):
+        with open(Path(__file__).parent / "assets" / "template.html") as f:
+            TEMPLATE = f.read()
+        return TEMPLATE.format(
+            # default_color_mode=self.default_color_mode,
+            metas=kwargs["metas"],
+            title=kwargs["title"],
+            favicon=kwargs["favicon"],
+            css=kwargs["css"],
+            app_entry=kwargs["app_entry"],
+            config=kwargs["config"],
+            scripts=kwargs["scripts"],
+            renderer=kwargs["renderer"],
+        )
+
+    def register_callbacks(self):
+        self.clientside_callback(
+            """
+                (switchOn) => {
+                document.documentElement.setAttribute("data-bs-theme", switchOn ? "light" : "dark"); 
+                return window.dash_clientside.no_update
+                }
+                """,
+            Output("switch", "id"),
+            Input("switch", "value"),
+        )
+
+        @self.callback(
+            Output("search-settings-modal", "is_open"),
+            [
+                Input("search-settings-open-button", "n_clicks"),
+                Input("search-settings-close-button", "n_clicks"),
+            ],
+            [State("search-settings-modal", "is_open")],
+        )
+        def toggle_search_settings_modal(open_clicks, close_clicks, is_open):
+            if open_clicks or close_clicks:
+                return not is_open
+            return is_open
+
+        @self.callback(
+            Output("navbar-collapse", "is_open"),
+            [Input("navbar-toggler", "n_clicks")],
+            [State("navbar-collapse", "is_open")],
+        )
+        def toggle_navbar_collapse(n, is_open):
+            if n:
+                return not is_open
+            return is_open
+
+        @self.callback(
+            Output("tabs-content", "children"),
+            Input("tabs", "active_tab"),
+            Input("nav-search-input", "value"),
+            Input("search-limit-input", "value"),
+            Input("network-depth-input", "value"),
+            Input("relation-types-select", "value"),
+        )
+        def render_tab_content(active_tab, query, limit, depth, rel_types):
+            if active_tab == "tab-1":
+                return self.get_explorer_tab(query, limit=limit)
+            elif active_tab == "tab-2":
+                return self.get_network_tab(
+                    query, limit=limit, depth=depth, rel_types=rel_types
+                )
+            return html.Div("No tab selected")
+
+    def get_explorer_tab(self, query: str | None = None, limit: int = 10):
+        results = search_words(self.client, query, limit=limit) if query else []
+        children = []
+        for word in results:
+            children.append(
+                dbc.Card(
+                    [
+                        dbc.CardHeader(word.word),
+                        dbc.CardBody(
+                            [
+                                html.H6("Definitions", className="card-title"),
+                                html.P(word.definition),
+                                html.H6("Examples", className="card-title"),
+                                html.Ul(
+                                    [
+                                        html.Li(example.example)
+                                        for example in get_examples(
+                                            self.client, word.id
+                                        )
+                                    ]
+                                ),
+                            ]
+                        ),
+                    ],
+                    className="mb-3",
+                )
+            )
+        return html.Div(children, id="explorer-tab", className="p-3")
+
+    def get_network_tab(
+        self,
+        query: str | None = None,
+        limit: int = 10,
+        depth: int = 3,
+        rel_types: List[str] = [],
+    ):
+        if query:
+            word_ids = [
+                word.id for word in search_words(self.client, query, limit=limit)
+            ]
+            relationships = []
+            for word_id in word_ids:
+                relationships.extend(
+                    get_relationships_with_depth(
+                        self.client,
+                        word_id,
+                        depth=depth,
+                        rel_types=rel_types,
                     )
-                else:
-                    st.write("No relationships found for this word.")
-            else:
-                st.write("Word not found. Please try another word.")
-
-
-def show_explorer_view(db: WikiLite, search_term):
-    if search_term:
-        # Show loading spinner during search
-        with st.spinner("Searching..."):
-            words = search_words(db, search_term)
-
-        if words:
-            # Create metrics row
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.markdown("""
-                    <div style='background-color: #1e293b; padding: 1.5rem; border-radius: 8px; text-align: center;'>
-                        <h3 style='color: #e2e8f0; margin: 0; font-size: 2rem;'>{count}</h3>
-                        <p style='color: #94a3b8; margin: 0.5rem 0 0 0;'>Results Found</p>
-                    </div>
-                """.format(count=len(words)), unsafe_allow_html=True)
-            
-            with col2:
-                example_count = sum(1 for word in words for _ in get_examples(db, word.id))
-                st.markdown("""
-                    <div style='background-color: #1e293b; padding: 1.5rem; border-radius: 8px; text-align: center;'>
-                        <h3 style='color: #e2e8f0; margin: 0; font-size: 2rem;'>{count}</h3>
-                        <p style='color: #94a3b8; margin: 0.5rem 0 0 0;'>Total Examples</p>
-                    </div>
-                """.format(count=example_count), unsafe_allow_html=True)
-            
-            with col3:
-                relation_count = sum(len(get_relationships(db, word.id)[0]) + len(get_relationships(db, word.id)[1]) for word in words)
-                st.markdown("""
-                    <div style='background-color: #1e293b; padding: 1.5rem; border-radius: 8px; text-align: center;'>
-                        <h3 style='color: #e2e8f0; margin: 0; font-size: 2rem;'>{count}</h3>
-                        <p style='color: #94a3b8; margin: 0.5rem 0 0 0;'>Total Relationships</p>
-                    </div>
-                """.format(count=relation_count), unsafe_allow_html=True)
-
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            # Display results in a grid
-            for i in range(0, len(words), 2):
-                col1, col2 = st.columns(2)
-                
-                # First column
-                with col1:
-                    if i < len(words):
-                        word = words[i]
-                        with st.container():
-                            st.markdown(f"""
-                                <div style='background-color: #1e293b; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem;'>
-                                    <h3 style='color: #e2e8f0; margin: 0 0 1rem 0; font-size: 1.3rem;'>{word.word}</h3>
-                                    <div style='color: #94a3b8; margin-bottom: 1rem;'>{word.definition[:200]}...</div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                            
-                            with st.expander("Show Details"):
-                                st.markdown("""
-                                    <div style='background-color: #1e293b; padding: 1rem; border-radius: 8px;'>
-                                """, unsafe_allow_html=True)
-                                
-                                st.markdown("<p style='color: #e2e8f0; font-weight: 600;'>Definition:</p>", unsafe_allow_html=True)
-                                st.markdown(f"<p style='color: #94a3b8;'>{word.definition}</p>", unsafe_allow_html=True)
-
-                                examples = get_examples(db, word.id)
-                                if examples:
-                                    st.markdown("<p style='color: #e2e8f0; font-weight: 600; margin-top: 1rem;'>Examples:</p>", unsafe_allow_html=True)
-                                    for example in examples:
-                                        st.markdown(f"<p style='color: #94a3b8; margin-left: 1rem;'>• {example.example}</p>", unsafe_allow_html=True)
-
-                                subject_relations, object_relations = get_relationships(db, word.id)
-                                if subject_relations or object_relations:
-                                    st.markdown("<p style='color: #e2e8f0; font-weight: 600; margin-top: 1rem;'>Semantic Relationships:</p>", unsafe_allow_html=True)
-                                    
-                                    if subject_relations:
-                                        st.markdown("<p style='color: #94a3b8; margin-left: 1rem;'>As subject:</p>", unsafe_allow_html=True)
-                                        for rel in subject_relations:
-                                            st.markdown(f"<p style='color: #94a3b8; margin-left: 2rem;'>• {word.word} {rel.predicate} {rel.object.word}</p>", unsafe_allow_html=True)
-                                    
-                                    if object_relations:
-                                        st.markdown("<p style='color: #94a3b8; margin-left: 1rem;'>As object:</p>", unsafe_allow_html=True)
-                                        for rel in object_relations:
-                                            st.markdown(f"<p style='color: #94a3b8; margin-left: 2rem;'>• {rel.subject.word} {rel.predicate} {word.word}</p>", unsafe_allow_html=True)
-                                
-                                st.markdown("</div>", unsafe_allow_html=True)
-
-                # Second column
-                with col2:
-                    if i + 1 < len(words):
-                        word = words[i + 1]
-                        with st.container():
-                            st.markdown(f"""
-                                <div style='background-color: #1e293b; padding: 1.5rem; border-radius: 8px; margin-bottom: 1rem;'>
-                                    <h3 style='color: #e2e8f0; margin: 0 0 1rem 0; font-size: 1.3rem;'>{word.word}</h3>
-                                    <div style='color: #94a3b8; margin-bottom: 1rem;'>{word.definition[:200]}...</div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                            
-                            with st.expander("Show Details"):
-                                st.markdown("""
-                                    <div style='background-color: #1e293b; padding: 1rem; border-radius: 8px;'>
-                                """, unsafe_allow_html=True)
-                                
-                                st.markdown("<p style='color: #e2e8f0; font-weight: 600;'>Definition:</p>", unsafe_allow_html=True)
-                                st.markdown(f"<p style='color: #94a3b8;'>{word.definition}</p>", unsafe_allow_html=True)
-
-                                examples = get_examples(db, word.id)
-                                if examples:
-                                    st.markdown("<p style='color: #e2e8f0; font-weight: 600; margin-top: 1rem;'>Examples:</p>", unsafe_allow_html=True)
-                                    for example in examples:
-                                        st.markdown(f"<p style='color: #94a3b8; margin-left: 1rem;'>• {example.example}</p>", unsafe_allow_html=True)
-
-                                subject_relations, object_relations = get_relationships(db, word.id)
-                                if subject_relations or object_relations:
-                                    st.markdown("<p style='color: #e2e8f0; font-weight: 600; margin-top: 1rem;'>Semantic Relationships:</p>", unsafe_allow_html=True)
-                                    
-                                    if subject_relations:
-                                        st.markdown("<p style='color: #94a3b8; margin-left: 1rem;'>As subject:</p>", unsafe_allow_html=True)
-                                        for rel in subject_relations:
-                                            st.markdown(f"<p style='color: #94a3b8; margin-left: 2rem;'>• {word.word} {rel.predicate} {rel.object.word}</p>", unsafe_allow_html=True)
-                                    
-                                    if object_relations:
-                                        st.markdown("<p style='color: #94a3b8; margin-left: 1rem;'>As object:</p>", unsafe_allow_html=True)
-                                        for rel in object_relations:
-                                            st.markdown(f"<p style='color: #94a3b8; margin-left: 2rem;'>• {rel.subject.word} {rel.predicate} {word.word}</p>", unsafe_allow_html=True)
-                                
-                                st.markdown("</div>", unsafe_allow_html=True)
-        else:
-            st.write("No results found.")
-    else:
-        st.write("Enter a word to search the WikiLite database.")
-
-
-def app():
-    # Page configuration
-    st.set_page_config(
-        page_title="WikiLite Explorer",
-        page_icon="📚",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-
-    # Custom CSS for dashboard layout
-    st.markdown(
-        """
-        <style>
-        /* Main layout and typography */
-        .stApp {
-            background-color: #0f172a !important;
-            font-family: 'Inter', sans-serif;
-        }
-        
-        .main .block-container {
-            padding-top: 2rem !important;
-            max-width: 1400px;
-        }
-
-        [data-testid="stSidebar"] {
-            background-color: #1e293b !important;
-            border-right: 1px solid #334155;
-        }
-        
-        [data-testid="stSidebar"] [data-testid="stMarkdown"] {
-            color: #e2e8f0 !important;
-        }
-        
-        h1 {
-            color: #e2e8f0 !important;
-            font-size: 2.5rem !important;
-            margin-bottom: 1rem !important;
-            font-weight: 700 !important;
-        }
-        
-        /* Search box styling */
-        .stTextInput input {
-            border: 2px solid #e5e7eb !important;
-            border-radius: 8px !important;
-            padding: 0.75rem 1rem !important;
-            font-size: 1.1rem !important;
-            transition: all 0.2s ease;
-        }
-        
-        .stTextInput input:focus {
-            border-color: #3b82f6 !important;
-            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1) !important;
-        }
-        
-        /* Tabs styling */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 8px;
-            margin-bottom: 1rem;
-        }
-        
-        .stTabs [data-baseweb="tab"] {
-            height: 45px !important;
-            padding: 0 20px !important;
-            border-radius: 8px !important;
-            background-color: #f3f4f6 !important;
-            color: #4b5563 !important;
-            font-weight: 500 !important;
-        }
-        
-        .stTabs [aria-selected="true"] {
-            background-color: #3b82f6 !important;
-            color: white !important;
-        }
-        
-        /* Expander styling */
-        .stExpander {
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            margin-bottom: 1rem;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-            transition: all 0.2s ease;
-        }
-        
-        .stExpander:hover {
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            transform: translateY(-1px);
-        }
-        
-        /* Select box styling */
-        .stSelectbox [data-baseweb="select"] {
-            border-radius: 8px !important;
-        }
-        
-        /* Multiselect styling */
-        .stMultiSelect [data-baseweb="select"] {
-            border-radius: 8px !important;
-        }
-        
-        /* Network view container */
-        iframe {
-            border: 1px solid #e5e7eb !important;
-            border-radius: 8px !important;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1) !important;
-        }
-        
-        /* Definition and examples styling */
-        .stMarkdown p {
-            line-height: 1.6 !important;
-            margin-bottom: 0.75rem !important;
-        }
-        
-        .stMarkdown strong {
-            color: #1e3a8a !important;
-            font-weight: 600 !important;
-        }
-        
-        /* Spinner styling */
-        .stSpinner > div {
-            border-color: #3b82f6 !important;
-        }
-        </style>
-    """,
-        unsafe_allow_html=True,
-    )
-
-    # Initialize database
-    db = init_db()
-
-    # Sidebar
-    with st.sidebar:
-        st.markdown("""
-            <div style='text-align: center; padding: 1rem; margin-bottom: 2rem;'>
-                <h1 style='font-size: 1.5rem; color: #e2e8f0; margin: 0;'>📚 WikiLite</h1>
-                <p style='color: #94a3b8; margin: 0.5rem 0 0 0;'>Dictionary Explorer</p>
-            </div>
-        """, unsafe_allow_html=True)
-
-        # Search box with placeholder
-        search_term = st.text_input(
-            "Search for a word",
-            placeholder="Type a word (e.g., 'apple', 'run', 'happy')",
-            key="search_input",
-        )
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("### Network Settings")
-        
-        # Depth selector for network view
-        depth = st.select_slider(
-            "Relationship Depth",
-            options=[1, 2, 3],
-            value=1,
-            help="Number of hops to explore"
-        )
-
-        # Get all unique predicates
-        predicates = get_unique_predicates(db)
-        # Multi-select for relationship types
-        selected_predicates = st.multiselect(
-            "Relationship Types",
-            options=predicates,
-            default=predicates[:5] if predicates else None,
-            help="Filter relationships",
-        )
-
-    # Main content area
-    if not search_term:
-        st.markdown("""
-            <div style='text-align: center; padding: 4rem 2rem; background-color: #1e293b; border-radius: 8px; margin: 2rem 0;'>
-                <h1 style='color: #e2e8f0; font-size: 2.5rem; margin-bottom: 1rem;'>Welcome to WikiLite Explorer</h1>
-                <p style='color: #94a3b8; font-size: 1.2rem; max-width: 600px; margin: 0 auto;'>
-                    Start by searching for a word in the sidebar to explore its meanings, examples, and relationships.
-                </p>
-            </div>
-        """, unsafe_allow_html=True)
-    else:
-        # Create tabs
-        tab1, tab2 = st.tabs(["Explorer", "Network Visualization"])
-
-        with tab1:
-            show_explorer_view(db, search_term)
-        with tab2:
-            show_network_view(db, search_term, depth, selected_predicates)
+                )
+            fig = create_network_graph(relationships)
+            return dcc.Graph(figure=fig)
+        return html.Div("No search query provided", id="network-tab", className="p-3")
 
 
 if __name__ == "__main__":
-    app()
+    app = WikiLiteApp(__name__)
+    app.run_server(debug=True, threaded=True)
