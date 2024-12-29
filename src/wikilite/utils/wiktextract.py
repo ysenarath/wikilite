@@ -52,6 +52,7 @@ class Example(BaseModel):
 
 
 class WordSense(BaseModel):
+    id: str
     glosses: List[str] = Field(default_factory=list)
     raw_glosses: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
@@ -147,16 +148,9 @@ def get_relations(
             for link in getattr(obj, rel):
                 edges.setdefault(rel, set()).add(link)
     elif isinstance(obj, WordEntry):
-        edges = {}
-        # word level relations
         for rel in relations:
             for link in getattr(obj, rel):
                 edges.setdefault(rel, set()).add(link)
-        # sense level relations of word
-        for sense in obj.senses:
-            for rel in relations:
-                for link in getattr(sense, rel):
-                    edges.setdefault(rel, set()).add(link)
     return edges
 
 
